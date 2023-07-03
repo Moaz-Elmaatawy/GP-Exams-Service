@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/dgrijalva/jwt-go"
 )
@@ -29,8 +30,8 @@ func main() {
 		return
 	}
 
-	token := "YOUR_JWT_TOKEN"
-	req.Header.Set("Authorization", "Bearer "+token)
+	apiKey := os.Getenv("apiKey")
+	req.Header.Set("X-API-KEY", apiKey)
 
 	resp, err := client.Do(req)
 	if err != nil {
