@@ -10,9 +10,11 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	random "math/rand"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -186,27 +188,43 @@ func createBucketsAndStoreExam(examID int64, encryptedContent []byte) ([]string,
 
 	s3Svc := s3.New(sess)
 
+	random.Seed(time.Now().UnixNano()) // Initialize the random number generator
+
 	var bucketLinks []string
 	for i := 0; i < 10; i++ {
-		bucketName := fmt.Sprintf("exam-bucket-%d-%d", examID, i+1)
+		for {
+			randomNumber := random.Intn(1000) // Generate a random number
 
-		_, err := s3Svc.CreateBucket(&s3.CreateBucketInput{
-			Bucket: aws.String(bucketName),
-		})
-		if err != nil {
-			return nil, err
+			bucketName := fmt.Sprintf("exam-bucket-%d-%d", examID, randomNumber)
+
+			// Check if the bucket already exists
+			_, err := s3Svc.HeadBucket(&s3.HeadBucketInput{
+				Bucket: aws.String(bucketName),
+			})
+			if err == nil {
+				// Bucket already exists, try with another random number
+				continue
+			}
+
+			_, err = s3Svc.CreateBucket(&s3.CreateBucketInput{
+				Bucket: aws.String(bucketName),
+			})
+			if err != nil {
+				return nil, err
+			}
+
+			_, err = s3Svc.PutObject(&s3.PutObjectInput{
+				Bucket: aws.String(bucketName),
+				Key:    aws.String("encrypted_exam"),
+				Body:   bytes.NewReader(encryptedContent),
+			})
+			if err != nil {
+				return nil, err
+			}
+
+			bucketLinks = append(bucketLinks, getBucketLink(bucketName))
+			break
 		}
-
-		_, err = s3Svc.PutObject(&s3.PutObjectInput{
-			Bucket: aws.String(bucketName),
-			Key:    aws.String("encrypted_exam"),
-			Body:   bytes.NewReader(encryptedContent),
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		bucketLinks = append(bucketLinks, getBucketLink(bucketName))
 	}
 
 	return bucketLinks, nil
