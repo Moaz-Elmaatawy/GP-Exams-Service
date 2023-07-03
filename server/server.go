@@ -1,13 +1,22 @@
 package main
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/dgrijalva/jwt-go"
 )
 
@@ -16,7 +25,10 @@ type Exam struct {
 	ExamContent string `json:"examContent"`
 }
 
-var examMap map[int64]string
+var (
+	examBucketMap    map[int64][]string
+	aesEncryptionKey = []byte("0123456789abcdef0123456789abcdef") // AES-256 key
+)
 
 func main() {
 	//jwt, _ := generateJWT([]byte("d066e1db96cc0cd3f5a80c0fdc1e569bd1dc73593564de7a691b5ef39044a9e0"))
@@ -53,9 +65,28 @@ func main() {
 		return
 	}
 
-	examMap = make(map[int64]string)
+	examBucketMap = make(map[int64][]string)
 	for _, exam := range exams {
-		examMap[exam.ExamID] = exam.ExamContent
+		encryptedContent, err := encrypt([]byte(exam.ExamContent))
+		if err != nil {
+			fmt.Println("Error encrypting exam content:", err)
+			continue
+		}
+
+		bucketLinks, err := createBucketsAndStoreExam(exam.ExamID, encryptedContent)
+		if err != nil {
+			fmt.Println("Error creating buckets and storing exam:", err)
+			continue
+		}
+
+		examBucketMap[exam.ExamID] = bucketLinks
+	}
+
+	// Print the map
+	for examID, bucketLinks := range examBucketMap {
+		fmt.Printf("Exam ID: %d\n", examID)
+		fmt.Println("Bucket Links:", strings.Join(bucketLinks, ", "))
+		fmt.Println()
 	}
 
 	// handle requests
@@ -70,18 +101,15 @@ func main() {
 		// Extract the examId from the JWT claims
 		examID := claims["examId"].(float64)
 		examIDInt := int64(examID)
+		studentID := claims["studentId"].(float64)
+		studentIDInt := int64(studentID)
 
-		// Retrieve the corresponding value from examMap
-		examContent, ok := examMap[examIDInt]
-		if !ok {
-			res.WriteHeader(http.StatusNotFound)
-			fmt.Fprintf(res, "Exam not found for examId: %d", examIDInt)
-			return
-		}
+		bucketLink := examBucketMap[examIDInt][studentIDInt%10]
 
 		res.Header().Set("Content-Type", "application/json")
 		responseBody, err := json.Marshal(map[string]string{
-			"examContent": examContent,
+			"bucketLink": bucketLink,
+			"key":        string(aesEncryptionKey),
 		})
 		if err != nil {
 			res.WriteHeader(http.StatusInternalServerError)
@@ -133,4 +161,56 @@ func verifyJWT(tokenString string, secretKey []byte) (jwt.MapClaims, error) {
 	}
 
 	return nil, fmt.Errorf("invalid token")
+}
+func encrypt(plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(aesEncryptionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	ciphertext := make([]byte, aes.BlockSize+len(plaintext))
+	iv := ciphertext[:aes.BlockSize]
+
+	_, err = io.ReadFull(rand.Reader, iv)
+	if err != nil {
+		return nil, err
+	}
+
+	mode := cipher.NewCBCEncrypter(block, iv)
+	mode.CryptBlocks(ciphertext[aes.BlockSize:], plaintext)
+
+	return ciphertext, nil
+}
+func createBucketsAndStoreExam(examID int64, encryptedContent []byte) ([]string, error) {
+	sess := session.Must(session.NewSession())
+
+	s3Svc := s3.New(sess)
+
+	var bucketLinks []string
+	for i := 0; i < 10; i++ {
+		bucketName := fmt.Sprintf("exam-bucket-%d-%d", examID, i+1)
+
+		_, err := s3Svc.CreateBucket(&s3.CreateBucketInput{
+			Bucket: aws.String(bucketName),
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		_, err = s3Svc.PutObject(&s3.PutObjectInput{
+			Bucket: aws.String(bucketName),
+			Key:    aws.String("encrypted_exam"),
+			Body:   bytes.NewReader(encryptedContent),
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		bucketLinks = append(bucketLinks, getBucketLink(bucketName))
+	}
+
+	return bucketLinks, nil
+}
+func getBucketLink(bucketName string) string {
+	return fmt.Sprintf("https://s3.amazonaws.com/%s", bucketName)
 }
